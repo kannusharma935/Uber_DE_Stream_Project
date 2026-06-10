@@ -1,169 +1,213 @@
-# 🚗 Uber End-to-End Data Engineering Project (Azure + Databricks)
+# Uber End-to-End Data Engineering Project (Azure + Databricks)
 
-A complete, production-style **real-time data engineering pipeline** built on **Azure** and **Databricks**, simulating an Uber-like ride data platform. The project covers everything from event ingestion to transformation, streaming, dimensional modeling, and a consumption-ready STAR schema.
+A hands-on **real-time data engineering pipeline** on **Azure** and **Databricks**, modeled after an Uber-style ride platform. The flow spans event ingestion, lake storage, orchestration, streaming transformation, dimensional modeling, and a consumption-ready **STAR schema**.
 
----
-
-## 📐 Architecture Diagram
-
-![Uber Data Engineering Architecture](ScreenShot/uber_data_engineering_architecture_v3.svg)
+This repository currently includes the **Event Hub producer** (synthetic ride events) and **reference dimension mappings**. Downstream stages—ADF ingestion, Databricks streaming, SCD logic, and the gold STAR schema—are part of the full pipeline design documented below.
 
 ---
 
-## 🛠️ Tech Stack
+## Architecture Diagram
+
+![Uber Data Engineering Architecture](./ScreenShot/uber_data_engineering_architecture_v3.svg)
+
+High-level view of how data moves from producers through Event Hubs, ADF, ADLS Gen2 (Bronze/Silver/Gold), and Databricks into an analytics-ready dimensional model.
+
+---
+
+## Azure Data Factory Pipeline
+
+![ADF Ingestion Pipeline](./ScreenShot/Pipeline.png)
+
+ADF pipeline that orchestrates ingestion from **Azure Event Hubs** into **ADLS Gen2** (raw/Bronze zone), forming the bridge between streaming ingestion and Databricks processing.
+
+---
+
+## Tech Stack
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| **Event Streaming** | Azure Event Hubs | Kafka-compatible real-time event ingestion |
-| **Orchestration** | Azure Data Factory (ADF) | Pipeline scheduling & ingestion automation |
-| **Storage** | Azure Data Lake Storage Gen2 | Raw, Silver, and Gold data zones |
-| **Processing** | Apache Spark / PySpark | Distributed data transformation |
-| **Streaming** | Spark Structured Streaming | Real-time stream processing |
-| **Compute** | Azure Databricks | Managed Spark platform |
-| **Modeling** | STAR Schema | Dimensional data modeling for analytics |
-| **SCD Handling** | PySpark SCD Logic | Slowly Changing Dimensions (Type 1/2) |
+| **Event streaming** | Azure Event Hubs | Kafka-compatible real-time event ingestion |
+| **Producer** | Python + `azure-eventhub` | Generate and publish synthetic ride events |
+| **Orchestration** | Azure Data Factory (ADF) | Schedule and automate ingestion into the lake |
+| **Storage** | Azure Data Lake Storage Gen2 | Bronze (raw), Silver (cleansed), Gold (modeled) zones |
+| **Processing** | Apache Spark / PySpark | Distributed transformation and enrichment |
+| **Streaming** | Spark Structured Streaming | Continuous processing from the lake |
+| **Compute** | Azure Databricks | Managed Spark notebooks and jobs |
+| **Modeling** | STAR schema + SCD | Fact/dimension tables for BI and analytics |
 
 ---
 
-## 📦 Project Components
+## What's in This Repo
 
-### 1. 🔌 Data Ingestion — WebApp → Azure Event Hub
-- A **web application** generates real-time Uber-like ride events.
-- Events are published to **Azure Event Hubs**, which provides a Kafka-compatible interface for high-throughput ingestion.
+### Event Hub Publisher (`Event_hub_Publisher/`)
 
-### 2. 🏭 Azure Data Factory — Ingestion Pipelines
-- **ADF pipelines** are built to move raw data from Event Hubs into **Azure Data Lake Gen2**.
-- Pipelines are parameterized and designed for reusability across multiple data sources.
+Python scripts that simulate Uber ride confirmations and publish JSON events to Azure Event Hubs.
 
-### 3. ⚡ PySpark Structured Streaming — Real-Time Processing
-- Databricks notebooks consume the streaming data using **Spark Structured Streaming**.
-- A **metadata-driven streaming framework** is implemented to handle multiple tables/entities dynamically without duplicating code.
+| File | Role |
+|---|---|
+| `data.py` | Generates realistic ride records (passenger, driver, vehicle, fare, timestamps) using **Faker** |
+| `connection.py` | Sends events to Event Hub via `EventHubProducerClient` |
+| `pyproject.toml` | Dependencies (`azure-eventhub`, `faker`, `python-dotenv`, etc.) |
 
-### 4. 🔄 Slowly Changing Dimensions (SCD)
-- SCD logic is implemented in PySpark to handle historical changes in dimension data.
-- Supports **Type 1** (overwrite) and **Type 2** (versioning with effective dates) patterns.
+Each event includes identifiers, foreign keys to lookup tables, location and pricing measures, and ride status—structured for downstream fact and dimension modeling.
 
-### 5. ⭐ STAR Schema Data Model
-- Final data is modeled into a **STAR schema** with:
-  - **Fact Table**: Trip/transaction-level events
-  - **Dimension Tables**: Driver, Rider, Location, Time, Payment, etc.
-- Optimized for analytical querying and BI consumption.
+**Example run:**
+
+```bash
+cd Event_hub_Publisher
+# Create .env with CONNECTION_STRING and EVENT_HUBNAME
+uv sync   # or: pip install -e .
+python connection.py
+```
+
+### Reference Mappings (`Dataset_Initial/`)
+
+JSON lookup tables used to seed dimension data and align generated events with stable surrogate keys:
+
+- `map_cities.json` — city, state, region
+- `map_vehicle_types.json` — UberX, UberXL, rates
+- `map_vehicle_makes.json` — vehicle manufacturers
+- `map_payment_methods.json` — card, wallet, cash
+- `map_ride_statuses.json` — completed / cancelled
+- `map_cancellation_reasons.json` — cancellation codes
+
+These mappings mirror the foreign keys embedded in each generated ride event (`vehicle_type_id`, `pickup_city_id`, etc.).
 
 ---
 
-## 🗂️ Project Structure
+## End-to-End Pipeline Stages
+
+| Stage | Component | Status in repo |
+|---|---|---|
+| 1. Produce events | `Event_hub_Publisher` | Implemented |
+| 2. Stream to lake | ADF → ADLS Gen2 Bronze | Documented (see pipeline screenshot) |
+| 3. Stream processing | Databricks Structured Streaming | Planned / external notebooks |
+| 4. SCD transforms | PySpark Type 1 & 2 | Planned |
+| 5. Gold layer | STAR schema (fact + dims) | Planned |
+
+---
+
+## Project Structure
 
 ```
-uber-data-engineering/
+Azure_DE_UBER_Stream/
 │
-├── ingestion/
-│   ├── webapp_to_eventhub/        # Web app → Event Hub producer scripts
-│   └── adf_pipelines/             # Azure Data Factory pipeline JSONs
+├── Event_hub_Publisher/
+│   ├── connection.py          # Event Hub producer client
+│   ├── data.py                # Synthetic ride event generator
+│   ├── files_array.json       # Mapping file manifest
+│   └── pyproject.toml         # Python dependencies
 │
-├── streaming/
-│   ├── pyspark_structured_streaming.py   # Base streaming notebook
-│   └── metadata_driven_streaming.py      # Dynamic multi-table streaming
+├── Dataset_Initial/
+│   ├── map_cities.json
+│   ├── map_vehicle_types.json
+│   ├── map_vehicle_makes.json
+│   ├── map_payment_methods.json
+│   ├── map_ride_statuses.json
+│   └── map_cancellation_reasons.json
 │
-├── transformations/
-│   ├── scd_type1.py               # SCD Type 1 logic
-│   └── scd_type2.py               # SCD Type 2 logic
-│
-├── data_modeling/
-│   ├── star_schema.py             # STAR schema creation
-│   ├── fact_trips.py              # Fact table logic
-│   └── dim_*.py                   # Dimension table scripts
-│
-├── config/
-│   └── metadata_config.json       # Metadata config for streaming framework
+├── ScreenShot/
+│   ├── uber_data_engineering_architecture_v3.svg
+│   └── Pipeline.png
 │
 └── README.md
 ```
 
 ---
 
-## 🚀 How to Run
+## How to Run the Event Producer
 
 ### Prerequisites
-- Azure subscription (free tier works)
-- Azure Databricks workspace
-- Azure Data Factory instance
-- Azure Event Hubs namespace
-- Azure Data Lake Storage Gen2
 
-### Setup Steps
+- Azure subscription
+- Azure Event Hubs namespace and hub
+- Python 3.12+
 
-1. **Provision Azure Resources**
-   - Create an Azure Event Hub namespace and hub
-   - Create an ADLS Gen2 storage account with hierarchical namespace enabled
-   - Set up Azure Databricks workspace
-   - Set up Azure Data Factory
+### Setup
 
-2. **Configure the Web App Producer**
-   - Update Event Hub connection strings in the config
-   - Run the webapp producer to start sending events
+1. **Create Event Hub resources** in Azure Portal (namespace + hub).
+2. **Configure credentials** — in `Event_hub_Publisher/`, create a `.env` file:
 
-3. **Deploy ADF Pipelines**
-   - Import the ADF pipeline JSON templates
-   - Configure linked services for Event Hub and ADLS
+   ```env
+   CONNECTION_STRING=Endpoint=sb://...
+   EVENT_HUBNAME=your-event-hub-name
+   ```
 
-4. **Run Databricks Notebooks**
-   - Mount ADLS to Databricks
-   - Run structured streaming notebooks
-   - Execute SCD transformation scripts
-   - Build and populate the STAR schema
+3. **Install dependencies** and publish a test event:
 
----
+   ```bash
+   cd Event_hub_Publisher
+   uv sync
+   python connection.py
+   ```
 
-## 🧠 Key Concepts Covered
+4. **Verify ingestion** — confirm events appear in Event Hub metrics or your ADF pipeline monitor before proceeding to lake ingestion.
 
-- ✅ Apache Kafka fundamentals (via Azure Event Hubs)
-- ✅ Azure Event Hub architecture and setup
-- ✅ Azure Data Factory — linked services, datasets, pipelines
-- ✅ Databricks workspace navigation and cluster setup
-- ✅ PySpark DataFrame & Streaming APIs
-- ✅ Metadata-driven pipeline design pattern
-- ✅ Slowly Changing Dimensions (SCD Type 1 & 2)
-- ✅ Dimensional data modeling (STAR Schema)
-- ✅ Data Lakehouse architecture (Bronze / Silver / Gold)
+### Full pipeline setup (Azure)
+
+1. Provision **ADLS Gen2**, **Databricks**, and **Data Factory**.
+2. Deploy the ADF pipeline (see screenshot above) with linked services for Event Hub and storage.
+3. Run Databricks notebooks for streaming, SCD, and STAR schema build-out.
 
 ---
 
-## 📊 Data Flow Summary
+## Data Flow
 
 ```
-Raw Events (WebApp)
+Synthetic ride events (Event_hub_Publisher)
     ↓
-Azure Event Hub (Kafka-compatible streaming)
+Azure Event Hubs
     ↓
-Azure Data Factory (Ingestion & orchestration)
-    ↓
-ADLS Gen2 — Raw/Bronze Zone
+Azure Data Factory → ADLS Gen2 (Bronze)
     ↓
 Databricks + PySpark Structured Streaming
     ↓
-ADLS Gen2 — Silver Zone (Cleaned & Enriched)
+ADLS Gen2 (Silver) — cleansed & enriched
     ↓
-SCD Transformations (Type 1 / Type 2)
+SCD Type 1 / Type 2 transforms
     ↓
-STAR Schema — Gold Zone (Analytics-Ready)
+STAR schema — Gold (analytics-ready)
 ```
 
 ---
 
-## 📚 References
+## Sample Event Fields
 
-- 📺 [Full Tutorial by Ansh Lamba](https://www.youtube.com/watch?v=5KIbhHo6GJA)
-- 📁 [Original Code Repository](https://github.com/anshlambagit)
-- 🗺️ [Data Engineer Roadmap](https://github.com/anshlambagit/Data_Engineer_Roadmap)
+Each ride confirmation JSON includes:
 
----
-
-## 🙌 Acknowledgements
-
-Project built following the **Uber End-To-End Data Engineering Project (2026)** tutorial by [Ansh Lamba](https://www.youtube.com/@anshlambajsr). All credit for the original project design and architecture goes to the author.
+- **Keys:** `ride_id`, `passenger_id`, `driver_id`, `vehicle_id`, location IDs
+- **Dimension FKs:** `vehicle_type_id`, `payment_method_id`, `ride_status_id`, `pickup_city_id`, etc.
+- **Measures:** `distance_miles`, `duration_minutes`, `total_fare`, `tip_amount`, `surge_multiplier`
+- **Timestamps:** `booking_timestamp`, `pickup_timestamp`, `dropoff_timestamp`
 
 ---
 
-## 📄 License
+## Key Concepts Covered
 
-This project is for educational purposes. Feel free to fork and build upon it.
+- Apache Kafka patterns via Azure Event Hubs
+- Event-driven ingestion and producer design
+- Azure Data Factory pipelines and linked services
+- Data Lakehouse zones (Bronze / Silver / Gold)
+- PySpark Structured Streaming and metadata-driven frameworks
+- Slowly Changing Dimensions (Type 1 & 2)
+- Dimensional modeling with a STAR schema
+
+---
+
+## References
+
+- [Full Tutorial by Ansh Lamba](https://www.youtube.com/watch?v=5KIbhHo6GJA)
+- [Original Code Repository](https://github.com/anshlambagit)
+- [Data Engineer Roadmap](https://github.com/anshlambagit/Data_Engineer_Roadmap)
+
+---
+
+## Acknowledgements
+
+Built following the **Uber End-To-End Data Engineering Project (2026)** tutorial by [Ansh Lamba](https://www.youtube.com/@anshlambajsr). Credit for the original pipeline design and architecture goes to the author.
+
+---
+
+## License
+
+Educational use. Fork and extend as needed.
