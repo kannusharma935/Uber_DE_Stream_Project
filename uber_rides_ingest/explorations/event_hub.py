@@ -8,8 +8,8 @@ from pyspark.sql.types import *
 EH_NAMESPACE                    = "ride-uberevents"
 EH_NAME                         = "ubertopic"
 
-# EH_CONN_STR                     = spark.conf.get("connection_string")
-EH_CONN_STR ="Endpoint=sb://ride-uberevents.servicebus.windows.net/;SharedAccessKeyName=listenpolicy;SharedAccessKey=O6u2ok/XSVPzGlso5La5qdAVQEm+GCKq4+AEhFsKDag=;EntityPath=ubertopic" 
+EH_CONN_STR                     = spark.conf.get("connection_string")
+
 # Kafka Consumer configuration
 
 KAFKA_OPTIONS = {
