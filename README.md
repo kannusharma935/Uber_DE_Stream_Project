@@ -1,6 +1,11 @@
 # Uber End-to-End Data Engineering Project (Azure + Databricks)
 
-A production-style **real-time data engineering pipeline** on **Azure** and **Databricks**, modeled after an Uber-style ride platform. Data flows from synthetic event producers through Event Hubs and ADF into a lakehouse, then through **Databricks Lakeflow Pipelines** (DLT) for streaming transformation, dimensional modeling, and a consumption-ready **STAR schema**.
+A production-style **real-time data engineering pipeline** on **Azure** and **Databricks**, modeled after an Uber-style ride platform. The design uses **two complementary Bronze ingestion paths**:
+
+- **Azure Data Factory (ADF)** — lands the **initial bulk load** and **mapping tables** (`map_cities`, `map_vehicle_types`, etc.) into the Bronze layer via ADLS Gen2.
+- **Databricks Lakeflow Pipeline (SDP)** — streams **live ride events** directly from **Azure Event Hubs** (Kafka API) into Delta tables.
+
+Downstream, SDP handles Silver enrichment, SCD logic, and the Gold **STAR schema**.
 
 ---
 
@@ -8,15 +13,15 @@ A production-style **real-time data engineering pipeline** on **Azure** and **Da
 
 ![Uber Data Engineering Architecture](./ScreenShot/uber_data_engineering_architecture_v3.svg)
 
-End-to-end view: producers → Event Hubs → ADF → ADLS Gen2 (Bronze) → Databricks streaming & DLT → Silver/Gold dimensional model.
+Broader Azure design: producers → Event Hubs, with **ADF** feeding initial load and reference data into Bronze (ADLS), and **SDP** consuming the live Event Hub stream in parallel. Both paths converge in Silver/Gold transformation inside Databricks.
 
 ---
 
-## Azure Data Factory Pipeline
+## Databricks Lakeflow Pipeline (SDP)
 
-![ADF Ingestion Pipeline](./ScreenShot/Pipeline.png)
+![Databricks SDP Pipeline](./ScreenShot/Pipeline.png)
 
-ADF orchestrates ingestion from **Azure Event Hubs** into **ADLS Gen2** (raw/Bronze zone), landing events and reference JSON files before Databricks picks them up.
+Visual DAG of the **Databricks Lakeflow Pipeline** (`uber_rides_ingest`) in the workspace UI. It shows how streaming tables and flows connect across the medallion layers — from `rides_raw` and `stg_rides` through `silver_obt` to the Gold **STAR schema** dimension and fact tables.
 
 ---
 
@@ -26,25 +31,36 @@ ADF orchestrates ingestion from **Azure Event Hubs** into **ADLS Gen2** (raw/Bro
 |---|---|---|
 | **Event streaming** | Azure Event Hubs | Kafka-compatible real-time ingestion |
 | **Producer** | Python + `azure-eventhub` | Generate and publish synthetic ride events |
-| **Orchestration** | Azure Data Factory (ADF) | Automate Event Hub → ADLS ingestion |
+| **Batch orchestration** | Azure Data Factory (ADF) | Initial load + mapping tables → ADLS Bronze |
 | **Storage** | ADLS Gen2 + Delta Lake | Bronze, Silver, and Gold medallion zones |
-| **Pipeline framework** | Databricks Lakeflow Pipelines (DLT) | Declarative streaming tables and flows |
+| **Streaming pipeline** | Databricks Lakeflow Pipeline (SDP) | Event Hub → Bronze streaming + Silver/Gold DAG |
 | **Processing** | PySpark Structured Streaming | Continuous read from Kafka / Delta |
 | **Modeling** | STAR schema + Auto CDC | SCD Type 1 & 2 dimensions + fact table |
 | **Enrichment** | SQL + Jinja2 | Metadata-driven One Big Table (OBT) joins |
 
 ---
 
+## Ingestion Architecture (Dual Path)
+
+| Path | Source | Tool | Bronze targets |
+|---|---|---|---|
+| **Batch / reference** | `Dataset_Initial/` JSON files + bulk ride history | **ADF** → ADLS Gen2 | `bulk_rides`, `map_cities`, `map_vehicle_types`, `map_vehicle_makes`, `map_payment_methods`, `map_ride_statuses`, `map_cancellation_reasons` |
+| **Real-time streaming** | Live ride events | **SDP** ← Event Hub (Kafka) | `rides_raw` |
+
+ADF handles one-time and periodic batch loads into the lake. SDP reads the Event Hub stream continuously — no ADF hop for live events.
+
 ## Pipeline Overview
 
 | Stage | Component | Location |
 |---|---|---|
 | 1. Produce events | Event Hub publisher | `Event_hub_Publisher/` |
-| 2. Land in lake | ADF → ADLS Gen2 | See `ScreenShot/Pipeline.png` |
-| 3. Bronze ingest | Kafka stream from Event Hub | `uber_rides_ingest/transformations/ingest.py` |
-| 4. Silver staging | JSON parse + bulk/stream merge | `uber_rides_ingest/transformations/silver.py` |
-| 5. Silver OBT | Join rides with dimension lookups | `uber_rides_ingest/transformations/silver_obt.sql` |
-| 6. Gold model | STAR schema (dims + fact) | `uber_rides_ingest/transformations/model.py` |
+| 2a. Bronze (batch) | ADF → ADLS → mapping tables + `bulk_rides` | ADF pipelines + `explorations/bronze_adls.py` |
+| 2b. Bronze (stream) | Event Hub → `rides_raw` | `transformations/ingest.py` |
+| 3. Silver staging | Parse JSON + merge bulk & stream → `stg_rides` | `transformations/silver.py` |
+| 4. Silver OBT | Join `stg_rides` with bronze lookups → `silver_obt` | `transformations/silver_obt.sql` |
+| 5. Gold model | STAR schema (dims + fact) | `transformations/model.py` |
+
+See `ScreenShot/Pipeline.png` for the Databricks SDP pipeline DAG (Bronze stream through Gold).
 
 ---
 
@@ -108,27 +124,36 @@ python connection.py
 
 ### 2. Reference Mappings (`Dataset_Initial/`)
 
-JSON lookup tables seeded into `uber.bronze.*` and joined during Silver enrichment:
+JSON lookup tables ingested by **ADF** into ADLS Gen2, then materialized as `uber.bronze.map_*` Delta tables (via `bronze_adls.py` or ADF copy activity):
 
 - Cities, vehicle types/makes, payment methods, ride statuses, cancellation reasons
 
-Foreign keys in each ride event (`vehicle_type_id`, `pickup_city_id`, etc.) align with these tables.
+Foreign keys in each ride event (`vehicle_type_id`, `pickup_city_id`, etc.) align with these tables and are joined in `silver_obt.sql`.
 
-### 3. Databricks Pipeline (`uber_rides_ingest/`)
+### 3. Azure Data Factory (ADF)
+
+ADF orchestrates **batch ingestion into the Bronze layer**:
+
+- **Initial load** — historical ride data landed as `bulk_rides` in Bronze (consumed by the `rides_bulk` append flow in `silver.py`)
+- **Mapping tables** — `Dataset_Initial/` JSON files copied from ADLS into `uber.bronze.map_*` tables
+
+Live streaming events bypass ADF and are read directly by SDP from Event Hub.
+
+### 4. Databricks Pipeline (`uber_rides_ingest/`)
 
 Lakeflow Pipeline built with `@dp.table`, `@dp.append_flow`, and `create_auto_cdc_flow`.
 
-#### Bronze — `ingest.py`
+#### Bronze (streaming) — `ingest.py`
 
-- Reads from Event Hub using the **Kafka protocol** (`kafka.bootstrap.servers`, SASL_SSL)
-- Writes a streaming Delta table `rides_raw` with the raw JSON payload in a `rides` column
+- Reads **directly from Event Hub** using the Kafka protocol (`kafka.bootstrap.servers`, SASL_SSL) — no ADF in this path
+- Writes streaming Delta table `rides_raw` with the raw JSON payload in a `rides` column
 
 #### Silver — `silver.py`
 
 - Defines `rides_schema` and parses JSON from `rides_raw`
-- Creates streaming table `stg_rides` with two append flows:
-  - **`rides_stream`** — live events from `rides_raw`
-  - **`rides_bulk`** — initial/historical load from `bulk_rides`
+- Creates streaming table `stg_rides` with two append flows that merge both ingestion paths:
+  - **`rides_stream`** — live events from `rides_raw` (Event Hub via SDP)
+  - **`rides_bulk`** — initial/historical load from `bulk_rides` (ADF → ADLS Bronze)
 
 #### Silver OBT — `silver_obt.sql`
 
@@ -158,16 +183,22 @@ Derives a STAR schema from `silver_obt` using Databricks **Auto CDC**:
 Event_hub_Publisher (synthetic JSON)
     ↓
 Azure Event Hubs
-    ↓
-ADF → ADLS Gen2 (Bronze: raw JSON + mapping files)
-    ↓
-DLT ingest.py — Kafka stream → rides_raw
-    ↓
-DLT silver.py — JSON parse → stg_rides
-    ↓
-DLT silver_obt.sql — joins → silver_obt
-    ↓
-DLT model.py — Auto CDC → dim_* + fact (Gold / STAR)
+    │
+    ├─ [real-time] ──► SDP ingest.py (Kafka) ──► rides_raw ────┐
+                                                   (bronze)    │                         
+                                                               │         
+ Github Repo                                                   │
+    └─ [batch via ADF] ──► ADLS Gen2 Bronze                    │
+              ├── bulk_rides ──────────────────────────────────┤
+              └── map_*.json (mapping tables)                  │
+                                                               ▼
+                                              SDP silver.py → stg_rides
+                                                              │
+                              silver_obt.sql (joins map_* tables)
+                                                              ▼
+                                                         silver_obt
+                                                              ▼
+                                              model.py → dim_* + fact (Gold)
 ```
 
 ---
@@ -186,21 +217,17 @@ DLT model.py — Auto CDC → dim_* + fact (Gold / STAR)
 
 3. Run `python connection.py` to publish ride events.
 
-### Step 2 — Ingest to the lake (ADF)
+### Step 2 — Ingest initial load & mapping tables (ADF)
 
-1. Deploy the ADF pipeline (see screenshot above).
-2. Configure linked services for Event Hub and ADLS Gen2.
-3. Confirm raw events and mapping JSONs land under the Bronze path.
+1. Upload `Dataset_Initial/` JSON files and any bulk ride history to ADLS Gen2.
+2. Deploy ADF pipelines to copy data into the Bronze layer:
+   - Mapping tables → `uber.bronze.map_*`
+   - Historical rides → `uber.bronze.bulk_rides`
+3. Alternatively, run `explorations/bronze_adls.py` in Databricks to load mapping JSONs from ADLS into Delta tables.
 
-### Step 3 — Seed bronze reference tables (Databricks)
+### Step 3 — Deploy the Databricks SDP pipeline
 
-1. Open `uber_rides_ingest/explorations/bronze_adls.py`.
-2. Point the ADLS URLs at your mapping JSON files (or upload `Dataset_Initial/` to your lake).
-3. Run the notebook to create `uber.bronze.map_*` tables.
-
-### Step 4 — Deploy the DLT pipeline
-
-1. In Databricks, create a **Lakeflow Pipeline** targeting `uber_rides_ingest/transformations/`.
+1. In Databricks, create a **Lakeflow Pipeline** targeting `uber_rides_ingest/transformations/` (see `ScreenShot/Pipeline.png` for the expected DAG).
 2. Set pipeline configuration for Event Hub access (recommended: Databricks secrets instead of hardcoded connection strings):
 
    ```python
@@ -208,9 +235,9 @@ DLT model.py — Auto CDC → dim_* + fact (Gold / STAR)
    ```
 
 3. Update `EH_NAMESPACE`, `EH_NAME`, and connection settings in `ingest.py` to match your environment.
-4. Start the pipeline — it will materialize `rides_raw` → `stg_rides` → `silver_obt` → dimension and fact tables.
+4. Start the pipeline — SDP will stream from Event Hub into `rides_raw`, merge with ADF-loaded `bulk_rides` in `stg_rides`, then build `silver_obt` and the Gold dimension/fact tables.
 
-### Step 5 — Validate
+### Step 4 — Validate
 
 Use the exploration notebooks to inspect intermediate tables:
 
@@ -233,26 +260,15 @@ Each ride confirmation JSON includes:
 
 ## Key Concepts Covered
 
+- Hybrid ingestion — ADF for batch/reference data, SDP for real-time Event Hub streaming
 - Event-driven architecture with Azure Event Hubs (Kafka API)
 - Medallion architecture — Bronze / Silver / Gold on Delta Lake
-- Databricks Lakeflow Pipelines (DLT) with streaming tables and append flows
+- Databricks Lakeflow Pipeline (SDP) with streaming tables and append flows
+- Azure Data Factory orchestration for initial load and dimension seeding
 - Metadata-driven SQL generation (Jinja2 for OBT joins)
 - Slowly Changing Dimensions — Auto CDC Type 1 and Type 2
 - Dimensional modeling — STAR schema with fact and dimension tables
 
----
-
-## References
-
-- [Full Tutorial by Ansh Lamba](https://www.youtube.com/watch?v=5KIbhHo6GJA)
-- [Original Code Repository](https://github.com/anshlambagit)
-- [Data Engineer Roadmap](https://github.com/anshlambagit/Data_Engineer_Roadmap)
-
----
-
-## Acknowledgements
-
-Built following the **Uber End-To-End Data Engineering Project (2026)** tutorial by [Ansh Lamba](https://www.youtube.com/@anshlambajsr). Credit for the original pipeline design and architecture goes to the author.
 
 ---
 
