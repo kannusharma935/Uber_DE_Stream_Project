@@ -2,7 +2,7 @@ import random
 import uuid
 import json
 from datetime import datetime, timedelta
-from faker import Faker
+# from faker import Faker
 from azure.eventhub import EventHubProducerClient, EventData
 import logging
 from dotenv import load_dotenv
